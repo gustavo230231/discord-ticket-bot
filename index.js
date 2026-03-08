@@ -64,8 +64,69 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
     logs: {
         channelId: null, // ID do canal de logs
         enabled: false
+    },
+    shop: {
+        channelId: null, // Canal da loja
+        deliveryChannelId: null, // Canal de entrega de códigos
+        enabled: false,
+        paymentMethods: {
+            paypal: 'pagamentos@pixelcode.com', // Email PayPal
+            mbway: '+351 912 345 678' // Número MBWay
+        }
     }
 };
+
+// Sistema de loja - produtos disponíveis
+const shopProducts = {
+    'discord_bot': {
+        name: '🤖 Bot Discord Personalizado',
+        description: 'Bot Discord completo com sistema de tickets, moderação e comandos personalizados',
+        price: 25.00,
+        currency: 'EUR',
+        deliveryType: 'code', // 'code', 'role', 'channel'
+        deliveryContent: 'Seu bot Discord foi criado! Código de acesso: BOT-{RANDOM}',
+        channelAccess: null // ID do canal para dar acesso
+    },
+    'website': {
+        name: '🌐 Website Profissional',
+        description: 'Website responsivo e moderno para sua empresa ou projeto pessoal',
+        price: 50.00,
+        currency: 'EUR',
+        deliveryType: 'code',
+        deliveryContent: 'Seu website está pronto! Link e credenciais: WEB-{RANDOM}',
+        channelAccess: null
+    },
+    'logo_design': {
+        name: '🎨 Logo Profissional',
+        description: 'Logo personalizado para sua marca com múltiplas variações e formatos',
+        price: 15.00,
+        currency: 'EUR',
+        deliveryType: 'code',
+        deliveryContent: 'Seu logo foi criado! Download: LOGO-{RANDOM}',
+        channelAccess: null
+    },
+    'video_edit': {
+        name: '🎬 Edição de Vídeo',
+        description: 'Edição profissional de vídeo até 10 minutos com efeitos e transições',
+        price: 30.00,
+        currency: 'EUR',
+        deliveryType: 'code',
+        deliveryContent: 'Seu vídeo foi editado! Download: VIDEO-{RANDOM}',
+        channelAccess: null
+    },
+    'premium_access': {
+        name: '⭐ Acesso Premium',
+        description: 'Acesso ao canal premium com conteúdo exclusivo e suporte prioritário',
+        price: 10.00,
+        currency: 'EUR',
+        deliveryType: 'channel',
+        deliveryContent: 'Bem-vindo ao Premium! Você agora tem acesso ao canal exclusivo.',
+        channelAccess: null // Será configurado depois
+    }
+};
+
+// Armazenar pedidos pendentes
+const pendingOrders = new Map();
 
 // Registrar slash commands
 const commands = [
@@ -143,6 +204,60 @@ const commands = [
         .addBooleanOption(option =>
             option.setName('ativar')
                 .setDescription('Ativar ou desativar logs')
+                .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('setup-loja')
+        .setDescription('Criar painel da loja automática')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('config-loja')
+        .setDescription('Configurar sistema de loja')
+        .addChannelOption(option =>
+            option.setName('canal-loja')
+                .setDescription('Canal onde será exibida a loja')
+                .setRequired(false))
+        .addChannelOption(option =>
+            option.setName('canal-entrega')
+                .setDescription('Canal onde serão entregues os códigos')
+                .setRequired(false))
+        .addStringOption(option =>
+            option.setName('paypal')
+                .setDescription('Email do PayPal para receber pagamentos')
+                .setRequired(false))
+        .addStringOption(option =>
+            option.setName('mbway')
+                .setDescription('Número MBWay para receber pagamentos')
+                .setRequired(false))
+        .addBooleanOption(option =>
+            option.setName('ativar')
+                .setDescription('Ativar ou desativar loja')
+                .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('config-produto')
+        .setDescription('Configurar um produto da loja')
+        .addStringOption(option =>
+            option.setName('produto')
+                .setDescription('ID do produto')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Bot Discord', value: 'discord_bot' },
+                    { name: 'Website', value: 'website' },
+                    { name: 'Logo Design', value: 'logo_design' },
+                    { name: 'Edição de Vídeo', value: 'video_edit' },
+                    { name: 'Acesso Premium', value: 'premium_access' }
+                ))
+        .addNumberOption(option =>
+            option.setName('preco')
+                .setDescription('Preço do produto em EUR')
+                .setRequired(false))
+        .addChannelOption(option =>
+            option.setName('canal-acesso')
+                .setDescription('Canal para dar acesso (apenas para produtos de acesso)')
                 .setRequired(false))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ];
@@ -383,6 +498,113 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.reply({ embeds: [embed], ephemeral: true });
         }
         
+        else if (interaction.commandName === 'setup-loja') {
+            const embed = new EmbedBuilder()
+                .setTitle('🛒 Loja Automática - Pixel & Code')
+                .setDescription(`Bem-vindo à nossa loja automática! 🎉
+
+Aqui você pode comprar nossos produtos digitais com pagamento instantâneo e entrega automática.
+
+💳 **Métodos de Pagamento:**
+💙 **PayPal** - Pagamento internacional seguro
+📱 **MBWay** - Pagamento instantâneo (Portugal)
+
+🔄 **Como funciona:**
+1️⃣ Escolha o produto desejado
+2️⃣ Clique em "Comprar"
+3️⃣ Escolha PayPal ou MBWay
+4️⃣ Faça o pagamento
+5️⃣ Confirme o pagamento
+6️⃣ Receba seu código/acesso automaticamente
+
+🔒 **Seguro e Confiável**
+✅ Pagamento seguro
+✅ Entrega instantânea
+✅ Suporte 24/7`)
+                .setColor('#00ff00')
+                .setFooter({ text: 'Loja Automática - Pixel & Code' });
+
+            // Criar botões para cada produto
+            const row1 = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('buy_discord_bot')
+                        .setLabel('🤖 Bot Discord - €25')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId('buy_website')
+                        .setLabel('� Website - €50')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId('buy_logo_design')
+                        .setLabel('🎨 Logo - €15')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+
+            const row2 = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('buy_video_edit')
+                        .setLabel('🎬 Edição Vídeo - €30')
+                        .setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder()
+                        .setCustomId('buy_premium_access')
+                        .setLabel('⭐ Premium - €10')
+                        .setStyle(ButtonStyle.Primary)
+                );
+
+            await interaction.reply({ embeds: [embed], components: [row1, row2] });
+        }
+        
+        else if (interaction.commandName === 'config-loja') {
+            const canalLoja = interaction.options.getChannel('canal-loja');
+            const canalEntrega = interaction.options.getChannel('canal-entrega');
+            const paypal = interaction.options.getString('paypal');
+            const mbway = interaction.options.getString('mbway');
+            const ativar = interaction.options.getBoolean('ativar');
+
+            if (canalLoja) botConfig.shop.channelId = canalLoja.id;
+            if (canalEntrega) botConfig.shop.deliveryChannelId = canalEntrega.id;
+            if (paypal) botConfig.shop.paymentMethods.paypal = paypal;
+            if (mbway) botConfig.shop.paymentMethods.mbway = mbway;
+            if (ativar !== null) botConfig.shop.enabled = ativar;
+
+            const embed = new EmbedBuilder()
+                .setTitle('🛒 Loja Configurada')
+                .setDescription('Sistema de loja foi atualizado com sucesso!')
+                .setColor('#00ff00')
+                .addFields(
+                    { name: 'Status', value: botConfig.shop.enabled ? '✅ Ativado' : '❌ Desativado', inline: true },
+                    { name: 'Canal Loja', value: botConfig.shop.channelId ? `<#${botConfig.shop.channelId}>` : 'Não configurado', inline: true },
+                    { name: 'Canal Entrega', value: botConfig.shop.deliveryChannelId ? `<#${botConfig.shop.deliveryChannelId}>` : 'Não configurado', inline: true },
+                    { name: '💙 PayPal', value: botConfig.shop.paymentMethods.paypal, inline: true },
+                    { name: '📱 MBWay', value: botConfig.shop.paymentMethods.mbway, inline: true }
+                );
+
+            await interaction.reply({ embeds: [embed], ephemeral: true });
+        }
+        
+        else if (interaction.commandName === 'config-produto') {
+            const produto = interaction.options.getString('produto');
+            const preco = interaction.options.getNumber('preco');
+            const canalAcesso = interaction.options.getChannel('canal-acesso');
+
+            if (preco) shopProducts[produto].price = preco;
+            if (canalAcesso) shopProducts[produto].channelAccess = canalAcesso.id;
+
+            const embed = new EmbedBuilder()
+                .setTitle('🛍️ Produto Configurado')
+                .setDescription(`Produto **${shopProducts[produto].name}** foi atualizado!`)
+                .setColor('#00ff00')
+                .addFields(
+                    { name: 'Produto', value: shopProducts[produto].name, inline: true },
+                    { name: 'Preço', value: `€${shopProducts[produto].price}`, inline: true },
+                    { name: 'Canal Acesso', value: shopProducts[produto].channelAccess ? `<#${shopProducts[produto].channelAccess}>` : 'Não configurado', inline: true }
+                );
+
+            await interaction.reply({ embeds: [embed], ephemeral: true });
+        }
+        
         return;
     }
     
@@ -390,6 +612,41 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isButton()) return;
 
     console.log(`Botão clicado: ${interaction.customId}`); // Debug
+
+    // Sistema de compras
+    if (interaction.customId.startsWith('buy_')) {
+        const productId = interaction.customId.replace('buy_', '');
+        await handlePurchase(interaction, productId);
+        return;
+    }
+
+    // Pagamento PayPal
+    if (interaction.customId.startsWith('pay_paypal_')) {
+        const orderId = interaction.customId.replace('pay_paypal_', '');
+        await showPayPalInstructions(interaction, orderId);
+        return;
+    }
+
+    // Pagamento MBWay
+    if (interaction.customId.startsWith('pay_mbway_')) {
+        const orderId = interaction.customId.replace('pay_mbway_', '');
+        await showMBWayInstructions(interaction, orderId);
+        return;
+    }
+
+    // Confirmação de pagamento
+    if (interaction.customId.startsWith('confirm_payment_')) {
+        const orderId = interaction.customId.replace('confirm_payment_', '');
+        await confirmPayment(interaction, orderId);
+        return;
+    }
+
+    // Cancelar pedido
+    if (interaction.customId.startsWith('cancel_order_')) {
+        const orderId = interaction.customId.replace('cancel_order_', '');
+        await cancelOrder(interaction, orderId);
+        return;
+    }
 
     // Diferentes tipos de tickets
     const ticketTypes = {
@@ -405,6 +662,284 @@ client.on('interactionCreate', async (interaction) => {
         await closeTicket(interaction);
     }
 });
+
+// Função para gerar código aleatório
+function generateRandomCode() {
+    return Math.random().toString(36).substring(2, 10).toUpperCase();
+}
+
+// Função para mostrar instruções PayPal
+async function showPayPalInstructions(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+
+    const embed = new EmbedBuilder()
+        .setTitle('💙 Pagamento via PayPal')
+        .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
+        .setColor('#0070ba')
+        .addFields(
+            { name: '📧 Email PayPal', value: botConfig.shop.paymentMethods.paypal, inline: false },
+            { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
+            { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '\u200B', value: '\u200B', inline: false },
+            { name: '📋 Instruções:', value: 
+                `1️⃣ Abra o PayPal ou acesse paypal.com\n` +
+                `2️⃣ Clique em "Enviar Dinheiro"\n` +
+                `3️⃣ Digite o email: **${botConfig.shop.paymentMethods.paypal}**\n` +
+                `4️⃣ Valor: **€${product.price}**\n` +
+                `5️⃣ Na descrição, coloque: **${orderId}**\n` +
+                `6️⃣ Confirme o pagamento\n` +
+                `7️⃣ Clique em "Confirmar Pagamento" abaixo`
+            }
+        )
+        .setFooter({ text: '⚠️ Importante: Inclua a referência na descrição do pagamento!' });
+
+    const buttons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(`confirm_payment_${orderId}`)
+                .setLabel('✅ Confirmar Pagamento')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`cancel_order_${orderId}`)
+                .setLabel('❌ Cancelar')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+    await interaction.update({ embeds: [embed], components: [buttons] });
+}
+
+// Função para mostrar instruções MBWay
+async function showMBWayInstructions(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+
+    const embed = new EmbedBuilder()
+        .setTitle('📱 Pagamento via MBWay')
+        .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
+        .setColor('#e20074')
+        .addFields(
+            { name: '📱 Número MBWay', value: botConfig.shop.paymentMethods.mbway, inline: false },
+            { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
+            { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '\u200B', value: '\u200B', inline: false },
+            { name: '📋 Instruções:', value: 
+                `1️⃣ Abra a app do seu banco\n` +
+                `2️⃣ Selecione "MBWay" → "Enviar Dinheiro"\n` +
+                `3️⃣ Digite o número: **${botConfig.shop.paymentMethods.mbway}**\n` +
+                `4️⃣ Valor: **€${product.price}**\n` +
+                `5️⃣ Na descrição, coloque: **${orderId}**\n` +
+                `6️⃣ Confirme com o PIN MBWay\n` +
+                `7️⃣ Clique em "Confirmar Pagamento" abaixo`
+            }
+        )
+        .setFooter({ text: '⚠️ Importante: Inclua a referência na descrição do pagamento!' });
+
+    const buttons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(`confirm_payment_${orderId}`)
+                .setLabel('✅ Confirmar Pagamento')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`cancel_order_${orderId}`)
+                .setLabel('❌ Cancelar')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+    await interaction.update({ embeds: [embed], components: [buttons] });
+}
+
+// Função para processar compra
+async function handlePurchase(interaction, productId) {
+    const product = shopProducts[productId];
+    if (!product) {
+        return interaction.reply({ content: '❌ Produto não encontrado!', ephemeral: true });
+    }
+
+    const orderId = `ORDER_${Date.now()}_${generateRandomCode()}`;
+    const member = interaction.member;
+
+    // Armazenar pedido pendente
+    pendingOrders.set(orderId, {
+        productId,
+        userId: member.id,
+        username: member.user.username,
+        timestamp: Date.now(),
+        status: 'pending'
+    });
+
+    const embed = new EmbedBuilder()
+        .setTitle('🛒 Escolha o Método de Pagamento')
+        .setDescription(`Você está prestes a comprar:\n\n**${product.name}**\n${product.description}`)
+        .setColor('#ffaa00')
+        .addFields(
+            { name: '💰 Preço', value: `€${product.price}`, inline: true },
+            { name: '🆔 Pedido', value: orderId, inline: true },
+            { name: '📦 Entrega', value: 'Automática após pagamento', inline: true }
+        )
+        .setFooter({ text: 'Escolha seu método de pagamento preferido' });
+
+    const buttons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(`pay_paypal_${orderId}`)
+                .setLabel('💙 Pagar com PayPal')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`pay_mbway_${orderId}`)
+                .setLabel('📱 Pagar com MBWay')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`cancel_order_${orderId}`)
+                .setLabel('❌ Cancelar')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+    await interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+
+    // Log da compra iniciada
+    await sendLog(
+        'PURCHASE_INITIATED',
+        '🛒 Compra Iniciada',
+        `${member.user} iniciou compra de **${product.name}**`,
+        '#ffaa00',
+        [
+            { name: '👤 Cliente', value: `${member.user.tag}`, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '� Valor', value: `€${product.price}`, inline: true },
+            { name: '🆔 Pedido', value: orderId, inline: false }
+        ]
+    );
+}
+
+// Função para confirmar pagamento (simulado)
+async function confirmPayment(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    if (order.userId !== interaction.user.id) {
+        return interaction.reply({ content: '❌ Este não é seu pedido!', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+    
+    // Simular verificação de pagamento (em produção, integrar com API real)
+    const paymentConfirmed = true; // Aqui você integraria com API de pagamento real
+
+    if (paymentConfirmed) {
+        // Marcar como pago
+        order.status = 'paid';
+        pendingOrders.set(orderId, order);
+
+        // Processar entrega
+        await processDelivery(interaction, order, product);
+        
+        // Remover pedido da lista
+        pendingOrders.delete(orderId);
+    } else {
+        await interaction.reply({ 
+            content: '❌ Pagamento não confirmado. Verifique se incluiu a referência correta.', 
+            ephemeral: true 
+        });
+    }
+}
+
+// Função para processar entrega
+async function processDelivery(interaction, order, product) {
+    const member = interaction.member;
+    const guild = interaction.guild;
+    const randomCode = generateRandomCode();
+    
+    let deliveryMessage = product.deliveryContent.replace('{RANDOM}', randomCode);
+    
+    // Processar diferentes tipos de entrega
+    if (product.deliveryType === 'channel' && product.channelAccess) {
+        // Dar acesso ao canal
+        const channel = guild.channels.cache.get(product.channelAccess);
+        if (channel) {
+            await channel.permissionOverwrites.create(member.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true
+            });
+            deliveryMessage += `\n\n🔓 Você agora tem acesso ao canal <#${product.channelAccess}>!`;
+        }
+    }
+
+    // Enviar código/acesso por DM
+    try {
+        const dmEmbed = new EmbedBuilder()
+            .setTitle('🎉 Compra Confirmada!')
+            .setDescription(`Obrigado pela sua compra!\n\n**Produto:** ${product.name}\n\n**Entrega:**\n${deliveryMessage}`)
+            .setColor('#00ff00')
+            .setTimestamp()
+            .setFooter({ text: 'Pixel & Code - Obrigado pela preferência!' });
+
+        await member.send({ embeds: [dmEmbed] });
+    } catch (error) {
+        console.log('Não foi possível enviar DM, enviando no canal de entrega');
+    }
+
+    // Enviar também no canal de entrega se configurado
+    if (botConfig.shop.deliveryChannelId) {
+        const deliveryChannel = guild.channels.cache.get(botConfig.shop.deliveryChannelId);
+        if (deliveryChannel) {
+            const publicEmbed = new EmbedBuilder()
+                .setTitle('📦 Entrega Realizada')
+                .setDescription(`${member} recebeu: **${product.name}**`)
+                .setColor('#00ff00')
+                .setTimestamp();
+
+            await deliveryChannel.send({ embeds: [publicEmbed] });
+        }
+    }
+
+    // Responder à interação
+    await interaction.reply({ 
+        content: '✅ Pagamento confirmado! Verifique sua DM para receber o produto.', 
+        ephemeral: true 
+    });
+
+    // Log da venda concluída
+    await sendLog(
+        'SALE_COMPLETED',
+        '💰 Venda Concluída',
+        `Venda de **${product.name}** para ${member.user} foi concluída`,
+        '#00ff00',
+        [
+            { name: '👤 Cliente', value: `${member.user.tag}`, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🎁 Código', value: randomCode, inline: true }
+        ]
+    );
+}
+
+// Função para cancelar pedido
+async function cancelOrder(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    if (order.userId !== interaction.user.id) {
+        return interaction.reply({ content: '❌ Este não é seu pedido!', ephemeral: true });
+    }
+
+    pendingOrders.delete(orderId);
+    await interaction.reply({ content: '✅ Pedido cancelado com sucesso!', ephemeral: true });
+}
 
 async function createTicket(interaction, ticketType) {
     const guild = interaction.guild;
