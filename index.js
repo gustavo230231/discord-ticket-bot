@@ -308,6 +308,11 @@ const commands = [
             option.setName('pedido')
                 .setDescription('ID do pedido para simular pagamento')
                 .setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('testar-comprovante')
+        .setDescription('Testar envio de comprovante (debug)')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ];
 
@@ -356,13 +361,28 @@ async function sendLog(type, title, description, color, fields = []) {
 
 // Função para enviar comprovante de compra
 async function sendPurchaseReceipt(customer, product, orderId, paymentMethod) {
-    if (!botConfig.shop.receiptsChannelId) return;
+    console.log('🔍 Tentando enviar comprovante...', {
+        hasChannel: !!botConfig.shop.receiptsChannelId,
+        channelId: botConfig.shop.receiptsChannelId,
+        customer: customer.user.tag,
+        product: product.name
+    });
+    
+    if (!botConfig.shop.receiptsChannelId) {
+        console.log('❌ Canal de comprovantes não configurado');
+        return;
+    }
     
     try {
         const guild = client.guilds.cache.get(process.env.GUILD_ID);
         const receiptsChannel = guild.channels.cache.get(botConfig.shop.receiptsChannelId);
         
-        if (!receiptsChannel) return;
+        if (!receiptsChannel) {
+            console.log('❌ Canal de comprovantes não encontrado:', botConfig.shop.receiptsChannelId);
+            return;
+        }
+        
+        console.log('✅ Canal encontrado, enviando comprovante...');
         
         const embed = new EmbedBuilder()
             .setTitle('📦 Entrega Realizada')
@@ -380,8 +400,9 @@ async function sendPurchaseReceipt(customer, product, orderId, paymentMethod) {
             .setFooter({ text: 'Sistema Automático - Pixel & Code' });
 
         await receiptsChannel.send({ embeds: [embed] });
+        console.log('✅ Comprovante enviado com sucesso!');
     } catch (error) {
-        console.error('Erro ao enviar comprovante:', error);
+        console.error('❌ Erro ao enviar comprovante:', error);
     }
 }
 
@@ -718,6 +739,15 @@ Aqui você pode comprar nossos produtos digitais com pagamento instantâneo e en
             // Simular pagamento recebido
             await processAutomaticDelivery(order);
             await interaction.reply({ content: `✅ Pagamento simulado para pedido ${pedidoId}! Cliente receberá o produto automaticamente.`, ephemeral: true });
+        }
+        
+        else if (interaction.commandName === 'testar-comprovante') {
+            const member = interaction.member;
+            const product = shopProducts['premium_access']; // Produto de teste
+            const orderId = `TEST_${Date.now()}`;
+            
+            await sendPurchaseReceipt(member, product, orderId, 'paypal');
+            await interaction.reply({ content: '✅ Comprovante de teste enviado! Verifica o canal de comprovantes.', ephemeral: true });
         }
         
         return;
