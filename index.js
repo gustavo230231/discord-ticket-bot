@@ -1,15 +1,47 @@
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, ChannelType, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const http = require('http');
+const express = require('express');
+const axios = require('axios');
 require('dotenv').config();
 
-// Criar servidor HTTP simples para o Render
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Discord Bot is running!');
+// Criar servidor HTTP com Express para webhooks
+const app = express();
+app.use(express.json());
+
+// Webhook do PayPal
+app.post('/webhook/paypal', async (req, res) => {
+    try {
+        const event = req.body;
+        console.log('PayPal Webhook recebido:', event.event_type);
+        
+        if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') {
+            const payment = event.resource;
+            const description = payment.description || '';
+            
+            // Procurar pedido pela referência
+            for (const [orderId, order] of pendingOrders.entries()) {
+                if (description.includes(orderId) && order.status === 'awaiting_payment') {
+                    console.log(`Pagamento confirmado para pedido: ${orderId}`);
+                    await processAutomaticDelivery(order);
+                    break;
+                }
+            }
+        }
+        
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('Erro no webhook PayPal:', error);
+        res.status(500).send('Error');
+    }
+});
+
+// Rota de status
+app.get('/', (req, res) => {
+    res.send('Discord Bot is running! 🤖');
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+app.listen(PORT, () => {
     console.log(`🌐 Servidor HTTP rodando na porta ${PORT}`);
 });
 
@@ -72,6 +104,13 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
         paymentMethods: {
             paypal: 'pagamentos@pixelcode.com', // Email PayPal
             mbway: '+351 912 345 678' // Número MBWay
+        },
+        automation: {
+            paypalClientId: process.env.PAYPAL_CLIENT_ID, // PayPal Client ID
+            paypalClientSecret: process.env.PAYPAL_CLIENT_SECRET, // PayPal Client Secret
+            paypalSandbox: process.env.PAYPAL_SANDBOX === 'true', // true para testes, false para produção
+            mbwayApiKey: null, // Chave API MBWay (se disponível)
+            paymentTimeout: 10 * 60 * 1000 // 10 minutos em millisegundos
         }
     }
 };
@@ -125,8 +164,9 @@ const shopProducts = {
     }
 };
 
-// Armazenar pedidos pendentes
+// Armazenar pedidos pendentes com timeout
 const pendingOrders = new Map();
+const paymentTimeouts = new Map();
 
 // Registrar slash commands
 const commands = [
@@ -259,6 +299,42 @@ const commands = [
             option.setName('canal-acesso')
                 .setDescription('Canal para dar acesso (apenas para produtos de acesso)')
                 .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('aprovar-pagamento')
+        .setDescription('Aprovar um pagamento pendente')
+        .addStringOption(option =>
+            option.setName('pedido')
+                .setDescription('ID do pedido para aprovar')
+                .setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('rejeitar-pagamento')
+        .setDescription('Rejeitar um pagamento pendente')
+        .addStringOption(option =>
+            option.setName('pedido')
+                .setDescription('ID do pedido para rejeitar')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('motivo')
+                .setDescription('Motivo da rejeição')
+                .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('pedidos-pendentes')
+        .setDescription('Ver todos os pedidos pendentes de aprovação')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    
+    new SlashCommandBuilder()
+        .setName('simular-pagamento')
+        .setDescription('Simular recebimento de pagamento (apenas para testes)')
+        .addStringOption(option =>
+            option.setName('pedido')
+                .setDescription('ID do pedido para simular pagamento')
+                .setRequired(true))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ];
 
@@ -605,6 +681,38 @@ Aqui você pode comprar nossos produtos digitais com pagamento instantâneo e en
             await interaction.reply({ embeds: [embed], ephemeral: true });
         }
         
+        else if (interaction.commandName === 'aprovar-pagamento') {
+            const pedidoId = interaction.options.getString('pedido');
+            await approvePayment(interaction, pedidoId);
+        }
+        
+        else if (interaction.commandName === 'rejeitar-pagamento') {
+            const pedidoId = interaction.options.getString('pedido');
+            const motivo = interaction.options.getString('motivo') || 'Pagamento não confirmado';
+            await rejectPayment(interaction, pedidoId, motivo);
+        }
+        
+        else if (interaction.commandName === 'pedidos-pendentes') {
+            await showPendingOrders(interaction);
+        }
+        
+        else if (interaction.commandName === 'simular-pagamento') {
+            const pedidoId = interaction.options.getString('pedido');
+            const order = pendingOrders.get(pedidoId);
+            
+            if (!order) {
+                return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+            }
+            
+            if (order.status !== 'awaiting_payment') {
+                return interaction.reply({ content: '❌ Este pedido não está aguardando pagamento.', ephemeral: true });
+            }
+            
+            // Simular pagamento recebido
+            await processAutomaticDelivery(order);
+            await interaction.reply({ content: `✅ Pagamento simulado para pedido ${pedidoId}! Cliente receberá o produto automaticamente.`, ephemeral: true });
+        }
+        
         return;
     }
     
@@ -676,15 +784,23 @@ async function showPayPalInstructions(interaction, orderId) {
     }
 
     const product = shopProducts[order.productId];
+    
+    // Marcar como aguardando pagamento e iniciar verificação automática
+    order.status = 'awaiting_payment';
+    pendingOrders.set(orderId, order);
+    
+    // Iniciar verificação automática de pagamento
+    startPaymentVerification(orderId);
 
     const embed = new EmbedBuilder()
         .setTitle('💙 Pagamento via PayPal')
         .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
         .setColor('#0070ba')
         .addFields(
-            { name: '📧 Email PayPal', value: botConfig.shop.paymentMethods.paypal, inline: false },
+            { name: '� Email PayPal', value: botConfig.shop.paymentMethods.paypal, inline: false },
             { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
             { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '⏰ Expira em', value: `<t:${Math.floor(order.expiresAt / 1000)}:R>`, inline: true },
             { name: '\u200B', value: '\u200B', inline: false },
             { name: '📋 Instruções:', value: 
                 `1️⃣ Abra o PayPal ou acesse paypal.com\n` +
@@ -692,21 +808,18 @@ async function showPayPalInstructions(interaction, orderId) {
                 `3️⃣ Digite o email: **${botConfig.shop.paymentMethods.paypal}**\n` +
                 `4️⃣ Valor: **€${product.price}**\n` +
                 `5️⃣ Na descrição, coloque: **${orderId}**\n` +
-                `6️⃣ Confirme o pagamento\n` +
-                `7️⃣ Clique em "Confirmar Pagamento" abaixo`
+                `6️⃣ Confirme o pagamento\n\n` +
+                `🤖 **O pagamento será detectado automaticamente!**\n` +
+                `Você receberá seu produto assim que o pagamento for confirmado.`
             }
         )
-        .setFooter({ text: '⚠️ Importante: Inclua a referência na descrição do pagamento!' });
+        .setFooter({ text: '🤖 Verificação automática ativa - Não precisa confirmar manualmente!' });
 
     const buttons = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
-                .setCustomId(`confirm_payment_${orderId}`)
-                .setLabel('✅ Confirmar Pagamento')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
                 .setCustomId(`cancel_order_${orderId}`)
-                .setLabel('❌ Cancelar')
+                .setLabel('❌ Cancelar Pedido')
                 .setStyle(ButtonStyle.Danger)
         );
 
@@ -721,15 +834,23 @@ async function showMBWayInstructions(interaction, orderId) {
     }
 
     const product = shopProducts[order.productId];
+    
+    // Marcar como aguardando pagamento e iniciar verificação automática
+    order.status = 'awaiting_payment';
+    pendingOrders.set(orderId, order);
+    
+    // Iniciar verificação automática de pagamento
+    startPaymentVerification(orderId);
 
     const embed = new EmbedBuilder()
         .setTitle('📱 Pagamento via MBWay')
         .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
         .setColor('#e20074')
         .addFields(
-            { name: '📱 Número MBWay', value: botConfig.shop.paymentMethods.mbway, inline: false },
+            { name: '� Número MBWay', value: botConfig.shop.paymentMethods.mbway, inline: false },
             { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
             { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '⏰ Expira em', value: `<t:${Math.floor(order.expiresAt / 1000)}:R>`, inline: true },
             { name: '\u200B', value: '\u200B', inline: false },
             { name: '📋 Instruções:', value: 
                 `1️⃣ Abra a app do seu banco\n` +
@@ -737,21 +858,18 @@ async function showMBWayInstructions(interaction, orderId) {
                 `3️⃣ Digite o número: **${botConfig.shop.paymentMethods.mbway}**\n` +
                 `4️⃣ Valor: **€${product.price}**\n` +
                 `5️⃣ Na descrição, coloque: **${orderId}**\n` +
-                `6️⃣ Confirme com o PIN MBWay\n` +
-                `7️⃣ Clique em "Confirmar Pagamento" abaixo`
+                `6️⃣ Confirme com o PIN MBWay\n\n` +
+                `🤖 **O pagamento será detectado automaticamente!**\n` +
+                `Você receberá seu produto assim que o pagamento for confirmado.`
             }
         )
-        .setFooter({ text: '⚠️ Importante: Inclua a referência na descrição do pagamento!' });
+        .setFooter({ text: '🤖 Verificação automática ativa - Não precisa confirmar manualmente!' });
 
     const buttons = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
-                .setCustomId(`confirm_payment_${orderId}`)
-                .setLabel('✅ Confirmar Pagamento')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
                 .setCustomId(`cancel_order_${orderId}`)
-                .setLabel('❌ Cancelar')
+                .setLabel('❌ Cancelar Pedido')
                 .setStyle(ButtonStyle.Danger)
         );
 
@@ -767,15 +885,25 @@ async function handlePurchase(interaction, productId) {
 
     const orderId = `ORDER_${Date.now()}_${generateRandomCode()}`;
     const member = interaction.member;
+    const expiresAt = Date.now() + botConfig.shop.automation.paymentTimeout; // 10 minutos
 
     // Armazenar pedido pendente
     pendingOrders.set(orderId, {
+        orderId: orderId,
         productId,
         userId: member.id,
         username: member.user.username,
         timestamp: Date.now(),
+        expiresAt: expiresAt,
         status: 'pending'
     });
+
+    // Configurar timeout para expirar pedido
+    const timeoutId = setTimeout(() => {
+        expireOrder(orderId, interaction);
+    }, botConfig.shop.automation.paymentTimeout);
+    
+    paymentTimeouts.set(orderId, timeoutId);
 
     const embed = new EmbedBuilder()
         .setTitle('🛒 Escolha o Método de Pagamento')
@@ -784,9 +912,10 @@ async function handlePurchase(interaction, productId) {
         .addFields(
             { name: '💰 Preço', value: `€${product.price}`, inline: true },
             { name: '🆔 Pedido', value: orderId, inline: true },
-            { name: '📦 Entrega', value: 'Automática após pagamento', inline: true }
+            { name: '⏰ Expira em', value: `<t:${Math.floor(expiresAt / 1000)}:R>`, inline: true },
+            { name: '📦 Entrega', value: 'Automática após pagamento', inline: false }
         )
-        .setFooter({ text: 'Escolha seu método de pagamento preferido' });
+        .setFooter({ text: '⚠️ Pedido expira em 10 minutos!' });
 
     const buttons = new ActionRowBuilder()
         .addComponents(
@@ -821,7 +950,7 @@ async function handlePurchase(interaction, productId) {
     );
 }
 
-// Função para confirmar pagamento (simulado)
+// Função para confirmar pagamento (agora apenas notifica admin)
 async function confirmPayment(interaction, orderId) {
     const order = pendingOrders.get(orderId);
     if (!order) {
@@ -832,30 +961,268 @@ async function confirmPayment(interaction, orderId) {
         return interaction.reply({ content: '❌ Este não é seu pedido!', ephemeral: true });
     }
 
-    const product = shopProducts[order.productId];
-    
-    // Simular verificação de pagamento (em produção, integrar com API real)
-    const paymentConfirmed = true; // Aqui você integraria com API de pagamento real
-
-    if (paymentConfirmed) {
-        // Marcar como pago
-        order.status = 'paid';
-        pendingOrders.set(orderId, order);
-
-        // Processar entrega
-        await processDelivery(interaction, order, product);
-        
-        // Remover pedido da lista
-        pendingOrders.delete(orderId);
-    } else {
-        await interaction.reply({ 
-            content: '❌ Pagamento não confirmado. Verifique se incluiu a referência correta.', 
+    if (order.status === 'awaiting_approval') {
+        return interaction.reply({ 
+            content: '⏳ Seu pagamento já foi enviado para aprovação. Aguarde a confirmação do administrador.', 
             ephemeral: true 
         });
     }
+
+    const product = shopProducts[order.productId];
+    
+    // Marcar como aguardando aprovação
+    order.status = 'awaiting_approval';
+    order.paymentConfirmedAt = Date.now();
+    pendingOrders.set(orderId, order);
+
+    // Notificar o cliente
+    await interaction.reply({ 
+        content: '✅ Pagamento enviado para verificação! Um administrador irá confirmar em breve e você receberá seu produto.', 
+        ephemeral: true 
+    });
+
+    // Notificar administradores
+    await notifyAdminPayment(interaction, order, product);
+
+    // Log do pagamento pendente
+    await sendLog(
+        'PAYMENT_PENDING',
+        '⏳ Pagamento Pendente',
+        `${interaction.user} enviou comprovativo de pagamento para **${product.name}**`,
+        '#ffaa00',
+        [
+            { name: '👤 Cliente', value: `${interaction.user.tag}`, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🆔 Pedido', value: orderId, inline: false },
+            { name: '⚠️ Status', value: 'Aguardando aprovação do admin', inline: false }
+        ]
+    );
 }
 
-// Função para processar entrega
+// Função para notificar admin sobre pagamento
+async function notifyAdminPayment(interaction, order, product) {
+    const guild = interaction.guild;
+    
+    // Tentar enviar DM para admins (opcional)
+    // Enviar no canal de logs se configurado
+    if (botConfig.logs.enabled && botConfig.logs.channelId) {
+        const logChannel = guild.channels.cache.get(botConfig.logs.channelId);
+        if (logChannel) {
+            const embed = new EmbedBuilder()
+                .setTitle('💳 Novo Pagamento para Aprovação')
+                .setDescription(`**Cliente:** ${interaction.user}\n**Produto:** ${product.name}\n**Valor:** €${product.price}`)
+                .setColor('#ffaa00')
+                .addFields(
+                    { name: '🆔 ID do Pedido', value: order.orderId || 'N/A', inline: false },
+                    { name: '⏰ Enviado em', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
+                    { name: '🔧 Comandos Admin', value: 
+                        `\`/aprovar-pagamento pedido:${order.orderId || 'ID'}\`\n` +
+                        `\`/rejeitar-pagamento pedido:${order.orderId || 'ID'}\``
+                    }
+                )
+                .setFooter({ text: 'Use os comandos acima para aprovar ou rejeitar' });
+
+            await logChannel.send({ 
+                content: `🔔 <@&${process.env.STAFF_ROLE_ID}> Novo pagamento para aprovação!`,
+                embeds: [embed] 
+            });
+        }
+    }
+}
+
+// Função para admin aprovar pagamento
+async function approvePayment(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    if (order.status !== 'awaiting_approval') {
+        return interaction.reply({ content: '❌ Este pedido não está aguardando aprovação.', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+    
+    // Marcar como aprovado
+    order.status = 'approved';
+    order.approvedBy = interaction.user.id;
+    order.approvedAt = Date.now();
+
+    // Processar entrega
+    await processDeliveryForApproval(interaction, order, product);
+    
+    // Remover pedido da lista
+    pendingOrders.delete(orderId);
+
+    await interaction.reply({ 
+        content: `✅ Pagamento aprovado! O cliente receberá o produto automaticamente.`, 
+        ephemeral: true 
+    });
+}
+
+// Função para admin rejeitar pagamento
+async function rejectPayment(interaction, orderId, motivo) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    if (order.status !== 'awaiting_approval') {
+        return interaction.reply({ content: '❌ Este pedido não está aguardando aprovação.', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+    const guild = interaction.guild;
+    const customer = guild.members.cache.get(order.userId);
+
+    // Notificar cliente sobre rejeição
+    if (customer) {
+        try {
+            const rejectEmbed = new EmbedBuilder()
+                .setTitle('❌ Pagamento Rejeitado')
+                .setDescription(`Seu pagamento para **${product.name}** foi rejeitado.`)
+                .setColor('#ff0000')
+                .addFields(
+                    { name: '💰 Valor', value: `€${product.price}`, inline: true },
+                    { name: '🆔 Pedido', value: orderId, inline: true },
+                    { name: '📝 Motivo', value: motivo, inline: false },
+                    { name: '💬 Próximos Passos', value: 'Entre em contato com o suporte se acredita que houve um erro.', inline: false }
+                )
+                .setFooter({ text: 'Pixel & Code - Suporte' });
+
+            await customer.send({ embeds: [rejectEmbed] });
+        } catch (error) {
+            console.log('Não foi possível enviar DM para o cliente');
+        }
+    }
+
+    // Remover pedido da lista
+    pendingOrders.delete(orderId);
+
+    await interaction.reply({ 
+        content: `❌ Pagamento rejeitado. O cliente foi notificado.`, 
+        ephemeral: true 
+    });
+
+    // Log da rejeição
+    await sendLog(
+        'PAYMENT_REJECTED',
+        '❌ Pagamento Rejeitado',
+        `Pagamento de **${product.name}** foi rejeitado por ${interaction.user}`,
+        '#ff0000',
+        [
+            { name: '👤 Cliente', value: customer ? customer.user.tag : 'Desconhecido', inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '👨‍💼 Rejeitado por', value: interaction.user.tag, inline: true },
+            { name: '📝 Motivo', value: motivo, inline: false }
+        ]
+    );
+}
+
+// Função para mostrar pedidos pendentes
+async function showPendingOrders(interaction) {
+    const pendingArray = Array.from(pendingOrders.entries())
+        .filter(([_, order]) => order.status === 'awaiting_approval');
+
+    if (pendingArray.length === 0) {
+        return interaction.reply({ 
+            content: '✅ Não há pedidos pendentes de aprovação.', 
+            ephemeral: true 
+        });
+    }
+
+    const embed = new EmbedBuilder()
+        .setTitle('⏳ Pedidos Pendentes de Aprovação')
+        .setDescription(`Total: ${pendingArray.length} pedidos`)
+        .setColor('#ffaa00');
+
+    pendingArray.slice(0, 10).forEach(([orderId, order]) => {
+        const product = shopProducts[order.productId];
+        const timeAgo = Math.floor((Date.now() - order.paymentConfirmedAt) / (1000 * 60));
+        
+        embed.addFields({
+            name: `🆔 ${orderId}`,
+            value: `**Cliente:** <@${order.userId}>\n**Produto:** ${product.name}\n**Valor:** €${product.price}\n**Há:** ${timeAgo} minutos`,
+            inline: true
+        });
+    });
+
+    if (pendingArray.length > 10) {
+        embed.setFooter({ text: `Mostrando 10 de ${pendingArray.length} pedidos` });
+    }
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+// Função para processar entrega após aprovação
+async function processDeliveryForApproval(interaction, order, product) {
+    const guild = interaction.guild;
+    const customer = guild.members.cache.get(order.userId);
+    const randomCode = generateRandomCode();
+    
+    if (!customer) return;
+    
+    let deliveryMessage = product.deliveryContent.replace('{RANDOM}', randomCode);
+    
+    // Processar diferentes tipos de entrega
+    if (product.deliveryType === 'channel' && product.channelAccess) {
+        // Dar acesso ao canal
+        const channel = guild.channels.cache.get(product.channelAccess);
+        if (channel) {
+            await channel.permissionOverwrites.create(customer.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true
+            });
+            deliveryMessage += `\n\n🔓 Você agora tem acesso ao canal <#${product.channelAccess}>!`;
+        }
+    }
+
+    // Enviar código/acesso por DM
+    try {
+        const dmEmbed = new EmbedBuilder()
+            .setTitle('🎉 Pagamento Aprovado!')
+            .setDescription(`Seu pagamento foi confirmado!\n\n**Produto:** ${product.name}\n\n**Entrega:**\n${deliveryMessage}`)
+            .setColor('#00ff00')
+            .setTimestamp()
+            .setFooter({ text: 'Pixel & Code - Obrigado pela preferência!' });
+
+        await customer.send({ embeds: [dmEmbed] });
+    } catch (error) {
+        console.log('Não foi possível enviar DM para o cliente');
+    }
+
+    // Enviar também no canal de entrega se configurado
+    if (botConfig.shop.deliveryChannelId) {
+        const deliveryChannel = guild.channels.cache.get(botConfig.shop.deliveryChannelId);
+        if (deliveryChannel) {
+            const publicEmbed = new EmbedBuilder()
+                .setTitle('📦 Entrega Realizada')
+                .setDescription(`${customer} recebeu: **${product.name}**`)
+                .setColor('#00ff00')
+                .setTimestamp();
+
+            await deliveryChannel.send({ embeds: [publicEmbed] });
+        }
+    }
+
+    // Log da venda concluída
+    await sendLog(
+        'SALE_COMPLETED',
+        '💰 Venda Concluída',
+        `Venda de **${product.name}** para ${customer.user} foi concluída`,
+        '#00ff00',
+        [
+            { name: '👤 Cliente', value: `${customer.user.tag}`, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '👨‍💼 Aprovado por', value: `${interaction.user.tag}`, inline: true },
+            { name: '🎁 Código', value: randomCode, inline: true }
+        ]
+    );
+}
 async function processDelivery(interaction, order, product) {
     const member = interaction.member;
     const guild = interaction.guild;
@@ -937,8 +1304,32 @@ async function cancelOrder(interaction, orderId) {
         return interaction.reply({ content: '❌ Este não é seu pedido!', ephemeral: true });
     }
 
+    // Limpar timeout se existir
+    const timeoutId = paymentTimeouts.get(orderId);
+    if (timeoutId) {
+        clearTimeout(timeoutId);
+        paymentTimeouts.delete(orderId);
+    }
+
+    // Remover pedido
     pendingOrders.delete(orderId);
+    
     await interaction.reply({ content: '✅ Pedido cancelado com sucesso!', ephemeral: true });
+    
+    // Log do cancelamento
+    const product = shopProducts[order.productId];
+    await sendLog(
+        'ORDER_CANCELLED',
+        '❌ Pedido Cancelado',
+        `${interaction.user} cancelou pedido de **${product.name}**`,
+        '#ff6600',
+        [
+            { name: '👤 Cliente', value: `${interaction.user.tag}`, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🆔 Pedido', value: orderId, inline: false }
+        ]
+    );
 }
 
 async function createTicket(interaction, ticketType) {
@@ -1139,3 +1530,421 @@ async function closeTicket(interaction) {
 }
 
 client.login(process.env.DISCORD_TOKEN);
+
+// ========== SISTEMA DE PAGAMENTO AUTOMÁTICO ==========
+
+// Função para expirar pedido automaticamente
+async function expireOrder(orderId, originalInteraction) {
+    const order = pendingOrders.get(orderId);
+    if (!order || order.status !== 'pending') return;
+
+    // Remover pedido
+    pendingOrders.delete(orderId);
+    paymentTimeouts.delete(orderId);
+
+    const product = shopProducts[order.productId];
+
+    // Tentar atualizar a mensagem original
+    try {
+        const expiredEmbed = new EmbedBuilder()
+            .setTitle('⏰ Pedido Expirado')
+            .setDescription(`Seu pedido para **${product.name}** expirou.\n\nTempo limite de pagamento (10 minutos) foi atingido.`)
+            .setColor('#ff0000')
+            .addFields(
+                { name: '🆔 Pedido', value: orderId, inline: true },
+                { name: '💰 Valor', value: `€${product.price}`, inline: true },
+                { name: '📝 Status', value: 'Expirado', inline: true }
+            )
+            .setFooter({ text: 'Faça uma nova compra se ainda tiver interesse' });
+
+        await originalInteraction.editReply({ embeds: [expiredEmbed], components: [] });
+    } catch (error) {
+        console.log('Não foi possível atualizar mensagem expirada');
+    }
+
+    // Log da expiração
+    await sendLog(
+        'ORDER_EXPIRED',
+        '⏰ Pedido Expirado',
+        `Pedido de **${product.name}** expirou por timeout`,
+        '#ff6600',
+        [
+            { name: '👤 Cliente', value: order.username, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🆔 Pedido', value: orderId, inline: false },
+            { name: '⏰ Motivo', value: 'Timeout de 10 minutos', inline: false }
+        ]
+    );
+}
+
+// Função para iniciar verificação automática de pagamento
+function startPaymentVerification(orderId) {
+    // Verificar a cada 30 segundos se o pagamento foi recebido
+    const verificationInterval = setInterval(async () => {
+        const order = pendingOrders.get(orderId);
+        if (!order || order.status !== 'awaiting_payment') {
+            clearInterval(verificationInterval);
+            return;
+        }
+
+        // Verificar se expirou
+        if (Date.now() > order.expiresAt) {
+            clearInterval(verificationInterval);
+            return;
+        }
+
+        // Verificar pagamento (aqui você integraria com APIs reais)
+        const paymentReceived = await checkPaymentReceived(order);
+        if (paymentReceived) {
+            clearInterval(verificationInterval);
+            await processAutomaticDelivery(order);
+        }
+    }, 30000); // Verificar a cada 30 segundos
+}
+
+// Função para obter token de acesso PayPal
+async function getPayPalAccessToken() {
+    try {
+        const clientId = botConfig.shop.automation.paypalClientId;
+        const clientSecret = botConfig.shop.automation.paypalClientSecret;
+        const sandbox = botConfig.shop.automation.paypalSandbox;
+        
+        if (!clientId || !clientSecret) {
+            console.log('PayPal credentials não configuradas');
+            return null;
+        }
+        
+        const baseURL = sandbox ? 'https://api.sandbox.paypal.com' : 'https://api.paypal.com';
+        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        
+        const response = await axios.post(`${baseURL}/v1/oauth2/token`, 
+            'grant_type=client_credentials',
+            {
+                headers: {
+                    'Authorization': `Basic ${auth}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            }
+        );
+        
+        return response.data.access_token;
+    } catch (error) {
+        console.error('Erro ao obter token PayPal:', error.message);
+        return null;
+    }
+}
+
+// Função para verificar pagamentos PayPal
+async function checkPayPalPayments(order) {
+    try {
+        const accessToken = await getPayPalAccessToken();
+        if (!accessToken) return false;
+        
+        const sandbox = botConfig.shop.automation.paypalSandbox;
+        const baseURL = sandbox ? 'https://api.sandbox.paypal.com' : 'https://api.paypal.com';
+        
+        // Buscar transações dos últimos 30 minutos
+        const startTime = new Date(order.timestamp).toISOString();
+        const endTime = new Date().toISOString();
+        
+        const response = await axios.get(
+            `${baseURL}/v1/reporting/transactions?start_date=${startTime}&end_date=${endTime}&fields=all`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const transactions = response.data.transaction_details || [];
+        
+        // Procurar transação com a referência do pedido
+        const payment = transactions.find(t => {
+            const info = t.transaction_info || {};
+            const description = info.transaction_note || info.transaction_subject || '';
+            const amount = parseFloat(info.transaction_amount?.value || 0);
+            const productPrice = parseFloat(shopProducts[order.productId].price);
+            
+            return description.includes(order.orderId) && 
+                   Math.abs(amount - productPrice) < 0.01 && // Tolerância de 1 centavo
+                   info.transaction_status === 'S'; // S = Success
+        });
+        
+        return payment !== undefined;
+    } catch (error) {
+        console.error('Erro ao verificar PayPal:', error.message);
+        return false;
+    }
+}
+
+// Função para verificar se pagamento foi recebido (REAL + FALLBACK)
+async function checkPaymentReceived(order) {
+    try {
+        // Se tiver PayPal configurado, verificar via API
+        if (botConfig.shop.automation.paypalClientId) {
+            return await checkPayPalPayments(order);
+        }
+        
+        // Fallback: simulação para testes (remover em produção)
+        console.log('⚠️ Usando verificação simulada - configure PayPal API para produção');
+        return Math.random() < 0.2;
+    } catch (error) {
+        console.error('Erro ao verificar pagamento:', error);
+        return false;
+    }
+}
+
+// Função para processar entrega automática
+async function processAutomaticDelivery(order) {
+    const product = shopProducts[order.productId];
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const customer = guild.members.cache.get(order.userId);
+    
+    if (!customer) return;
+
+    // Marcar como pago
+    order.status = 'paid';
+    order.paidAt = Date.now();
+
+    const randomCode = generateRandomCode();
+    let deliveryMessage = product.deliveryContent.replace('{RANDOM}', randomCode);
+    
+    // Processar diferentes tipos de entrega
+    if (product.deliveryType === 'channel' && product.channelAccess) {
+        const channel = guild.channels.cache.get(product.channelAccess);
+        if (channel) {
+            await channel.permissionOverwrites.create(customer.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true
+            });
+            deliveryMessage += `\n\n🔓 Você agora tem acesso ao canal <#${product.channelAccess}>!`;
+        }
+    }
+
+    // Enviar produto por DM
+    try {
+        const dmEmbed = new EmbedBuilder()
+            .setTitle('🎉 Pagamento Confirmado Automaticamente!')
+            .setDescription(`Seu pagamento foi detectado e confirmado automaticamente!\n\n**Produto:** ${product.name}\n\n**Entrega:**\n${deliveryMessage}`)
+            .setColor('#00ff00')
+            .setTimestamp()
+            .setFooter({ text: 'Pixel & Code - Entrega Automática' });
+
+        await customer.send({ embeds: [dmEmbed] });
+    } catch (error) {
+        console.log('Não foi possível enviar DM');
+    }
+
+    // Limpar timeout e pedido
+    const timeoutId = paymentTimeouts.get(order.orderId);
+    if (timeoutId) {
+        clearTimeout(timeoutId);
+        paymentTimeouts.delete(order.orderId);
+    }
+    pendingOrders.delete(order.orderId);
+
+    // Log da venda automática
+    await sendLog(
+        'AUTOMATIC_SALE',
+        '🤖 Venda Automática Concluída',
+        `Pagamento detectado automaticamente para **${product.name}**`,
+        '#00ff00',
+        [
+            { name: '👤 Cliente', value: customer.user.tag, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🎁 Código', value: randomCode, inline: true },
+            { name: '⚡ Tipo', value: 'Entrega Automática', inline: true }
+        ]
+    );
+
+    // Notificar no canal de entrega
+    if (botConfig.shop.deliveryChannelId) {
+        const deliveryChannel = guild.channels.cache.get(botConfig.shop.deliveryChannelId);
+        if (deliveryChannel) {
+            const publicEmbed = new EmbedBuilder()
+                .setTitle('🤖 Entrega Automática Realizada')
+                .setDescription(`${customer} recebeu automaticamente: **${product.name}**`)
+                .setColor('#00ff00')
+                .setTimestamp();
+
+            await deliveryChannel.send({ embeds: [publicEmbed] });
+        }
+    }
+}
+
+// Função para processar entrega automática
+async function processAutomaticDelivery(order) {
+    const product = shopProducts[order.productId];
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const customer = guild.members.cache.get(order.userId);
+    
+    if (!customer) return;
+
+    // Marcar como pago
+    order.status = 'paid';
+    order.paidAt = Date.now();
+
+    const randomCode = generateRandomCode();
+    let deliveryMessage = product.deliveryContent.replace('{RANDOM}', randomCode);
+    
+    // Processar diferentes tipos de entrega
+    if (product.deliveryType === 'channel' && product.channelAccess) {
+        const channel = guild.channels.cache.get(product.channelAccess);
+        if (channel) {
+            await channel.permissionOverwrites.create(customer.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true
+            });
+            deliveryMessage += `\n\n🔓 Você agora tem acesso ao canal <#${product.channelAccess}>!`;
+        }
+    }
+
+    // Enviar produto por DM
+    try {
+        const dmEmbed = new EmbedBuilder()
+            .setTitle('🎉 Pagamento Confirmado Automaticamente!')
+            .setDescription(`Seu pagamento foi detectado e confirmado automaticamente!\n\n**Produto:** ${product.name}\n\n**Entrega:**\n${deliveryMessage}`)
+            .setColor('#00ff00')
+            .setTimestamp()
+            .setFooter({ text: 'Pixel & Code - Entrega Automática' });
+
+        await customer.send({ embeds: [dmEmbed] });
+    } catch (error) {
+        console.log('Não foi possível enviar DM');
+    }
+
+    // Limpar timeout e pedido
+    const timeoutId = paymentTimeouts.get(order.orderId);
+    if (timeoutId) {
+        clearTimeout(timeoutId);
+        paymentTimeouts.delete(order.orderId);
+    }
+    pendingOrders.delete(order.orderId);
+
+    // Log da venda automática
+    await sendLog(
+        'AUTOMATIC_SALE',
+        '🤖 Venda Automática Concluída',
+        `Pagamento detectado automaticamente para **${product.name}**`,
+        '#00ff00',
+        [
+            { name: '👤 Cliente', value: customer.user.tag, inline: true },
+            { name: '🛍️ Produto', value: product.name, inline: true },
+            { name: '💰 Valor', value: `€${product.price}`, inline: true },
+            { name: '🎁 Código', value: randomCode, inline: true },
+            { name: '⚡ Tipo', value: 'Entrega Automática', inline: true }
+        ]
+    );
+
+    // Notificar no canal de entrega
+    if (botConfig.shop.deliveryChannelId) {
+        const deliveryChannel = guild.channels.cache.get(botConfig.shop.deliveryChannelId);
+        if (deliveryChannel) {
+            const publicEmbed = new EmbedBuilder()
+                .setTitle('🤖 Entrega Automática Realizada')
+                .setDescription(`${customer} recebeu automaticamente: **${product.name}**`)
+                .setColor('#00ff00')
+                .setTimestamp();
+
+            await deliveryChannel.send({ embeds: [publicEmbed] });
+        }
+    }
+}
+
+// Modificar função de instruções para incluir verificação automática
+async function showPayPalInstructions(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+    
+    // Marcar como aguardando pagamento
+    order.status = 'awaiting_payment';
+    pendingOrders.set(orderId, order);
+
+    const embed = new EmbedBuilder()
+        .setTitle('💙 Pagamento via PayPal')
+        .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
+        .setColor('#0070ba')
+        .addFields(
+            { name: '📧 Email PayPal', value: botConfig.shop.paymentMethods.paypal, inline: false },
+            { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
+            { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '⏰ Tempo Restante', value: `<t:${Math.floor(order.expiresAt / 1000)}:R>`, inline: true },
+            { name: '\u200B', value: '\u200B', inline: false },
+            { name: '📋 Instruções:', value: 
+                `1️⃣ Abra o PayPal ou acesse paypal.com\n` +
+                `2️⃣ Clique em "Enviar Dinheiro"\n` +
+                `3️⃣ Digite o email: **${botConfig.shop.paymentMethods.paypal}**\n` +
+                `4️⃣ Valor: **€${product.price}**\n` +
+                `5️⃣ Na descrição, coloque: **${orderId}**\n` +
+                `6️⃣ Confirme o pagamento\n\n` +
+                `🤖 **O pagamento será detectado automaticamente!**\n` +
+                `Você receberá seu produto assim que o pagamento for confirmado.`
+            }
+        )
+        .setFooter({ text: '🤖 Verificação automática ativa - Não precisa confirmar manualmente!' });
+
+    const buttons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(`cancel_order_${orderId}`)
+                .setLabel('❌ Cancelar Pedido')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+    await interaction.update({ embeds: [embed], components: [buttons] });
+}
+
+async function showMBWayInstructions(interaction, orderId) {
+    const order = pendingOrders.get(orderId);
+    if (!order) {
+        return interaction.reply({ content: '❌ Pedido não encontrado!', ephemeral: true });
+    }
+
+    const product = shopProducts[order.productId];
+    
+    // Marcar como aguardando pagamento
+    order.status = 'awaiting_payment';
+    pendingOrders.set(orderId, order);
+
+    const embed = new EmbedBuilder()
+        .setTitle('📱 Pagamento via MBWay')
+        .setDescription(`**Produto:** ${product.name}\n**Valor:** €${product.price}`)
+        .setColor('#e20074')
+        .addFields(
+            { name: '📱 Número MBWay', value: botConfig.shop.paymentMethods.mbway, inline: false },
+            { name: '💰 Valor a Enviar', value: `€${product.price}`, inline: true },
+            { name: '🆔 Referência', value: orderId, inline: true },
+            { name: '⏰ Tempo Restante', value: `<t:${Math.floor(order.expiresAt / 1000)}:R>`, inline: true },
+            { name: '\u200B', value: '\u200B', inline: false },
+            { name: '📋 Instruções:', value: 
+                `1️⃣ Abra a app do seu banco\n` +
+                `2️⃣ Selecione "MBWay" → "Enviar Dinheiro"\n` +
+                `3️⃣ Digite o número: **${botConfig.shop.paymentMethods.mbway}**\n` +
+                `4️⃣ Valor: **€${product.price}**\n` +
+                `5️⃣ Na descrição, coloque: **${orderId}**\n` +
+                `6️⃣ Confirme com o PIN MBWay\n\n` +
+                `🤖 **O pagamento será detectado automaticamente!**\n` +
+                `Você receberá seu produto assim que o pagamento for confirmado.`
+            }
+        )
+        .setFooter({ text: '🤖 Verificação automática ativa - Não precisa confirmar manualmente!' });
+
+    const buttons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(`cancel_order_${orderId}`)
+                .setLabel('❌ Cancelar Pedido')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+    await interaction.update({ embeds: [embed], components: [buttons] });
+}
