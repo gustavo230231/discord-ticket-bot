@@ -1,47 +1,15 @@
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, ChannelType, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const http = require('http');
-const express = require('express');
-const axios = require('axios');
 require('dotenv').config();
 
-// Criar servidor HTTP com Express para webhooks
-const app = express();
-app.use(express.json());
-
-// Webhook do PayPal
-app.post('/webhook/paypal', async (req, res) => {
-    try {
-        const event = req.body;
-        console.log('PayPal Webhook recebido:', event.event_type);
-        
-        if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') {
-            const payment = event.resource;
-            const description = payment.description || '';
-            
-            // Procurar pedido pela referência
-            for (const [orderId, order] of pendingOrders.entries()) {
-                if (description.includes(orderId) && order.status === 'awaiting_payment') {
-                    console.log(`Pagamento confirmado para pedido: ${orderId}`);
-                    await processAutomaticDelivery(order);
-                    break;
-                }
-            }
-        }
-        
-        res.status(200).send('OK');
-    } catch (error) {
-        console.error('Erro no webhook PayPal:', error);
-        res.status(500).send('Error');
-    }
-});
-
-// Rota de status
-app.get('/', (req, res) => {
-    res.send('Discord Bot is running! 🤖');
+// Criar servidor HTTP simples para o Railway
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Discord Bot is running! 🤖');
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`🌐 Servidor HTTP rodando na porta ${PORT}`);
 });
 
@@ -106,10 +74,10 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
             mbway: '+351 912 345 678' // Número MBWay
         },
         automation: {
-            paypalClientId: process.env.PAYPAL_CLIENT_ID, // PayPal Client ID
-            paypalClientSecret: process.env.PAYPAL_CLIENT_SECRET, // PayPal Client Secret
-            paypalSandbox: process.env.PAYPAL_SANDBOX === 'true', // true para testes, false para produção
-            mbwayApiKey: null, // Chave API MBWay (se disponível)
+            paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
+            paypalClientSecret: process.env.PAYPAL_CLIENT_SECRET || null,
+            paypalSandbox: process.env.PAYPAL_SANDBOX === 'true',
+            mbwayApiKey: null,
             paymentTimeout: 10 * 60 * 1000 // 10 minutos em millisegundos
         }
     }
@@ -1603,91 +1571,10 @@ function startPaymentVerification(orderId) {
     }, 30000); // Verificar a cada 30 segundos
 }
 
-// Função para obter token de acesso PayPal
-async function getPayPalAccessToken() {
-    try {
-        const clientId = botConfig.shop.automation.paypalClientId;
-        const clientSecret = botConfig.shop.automation.paypalClientSecret;
-        const sandbox = botConfig.shop.automation.paypalSandbox;
-        
-        if (!clientId || !clientSecret) {
-            console.log('PayPal credentials não configuradas');
-            return null;
-        }
-        
-        const baseURL = sandbox ? 'https://api.sandbox.paypal.com' : 'https://api.paypal.com';
-        const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-        
-        const response = await axios.post(`${baseURL}/v1/oauth2/token`, 
-            'grant_type=client_credentials',
-            {
-                headers: {
-                    'Authorization': `Basic ${auth}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            }
-        );
-        
-        return response.data.access_token;
-    } catch (error) {
-        console.error('Erro ao obter token PayPal:', error.message);
-        return null;
-    }
-}
-
-// Função para verificar pagamentos PayPal
-async function checkPayPalPayments(order) {
-    try {
-        const accessToken = await getPayPalAccessToken();
-        if (!accessToken) return false;
-        
-        const sandbox = botConfig.shop.automation.paypalSandbox;
-        const baseURL = sandbox ? 'https://api.sandbox.paypal.com' : 'https://api.paypal.com';
-        
-        // Buscar transações dos últimos 30 minutos
-        const startTime = new Date(order.timestamp).toISOString();
-        const endTime = new Date().toISOString();
-        
-        const response = await axios.get(
-            `${baseURL}/v1/reporting/transactions?start_date=${startTime}&end_date=${endTime}&fields=all`,
-            {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        
-        const transactions = response.data.transaction_details || [];
-        
-        // Procurar transação com a referência do pedido
-        const payment = transactions.find(t => {
-            const info = t.transaction_info || {};
-            const description = info.transaction_note || info.transaction_subject || '';
-            const amount = parseFloat(info.transaction_amount?.value || 0);
-            const productPrice = parseFloat(shopProducts[order.productId].price);
-            
-            return description.includes(order.orderId) && 
-                   Math.abs(amount - productPrice) < 0.01 && // Tolerância de 1 centavo
-                   info.transaction_status === 'S'; // S = Success
-        });
-        
-        return payment !== undefined;
-    } catch (error) {
-        console.error('Erro ao verificar PayPal:', error.message);
-        return false;
-    }
-}
-
-// Função para verificar se pagamento foi recebido (REAL + FALLBACK)
+// Função para verificar se pagamento foi recebido (SIMULADA + FALLBACK)
 async function checkPaymentReceived(order) {
     try {
-        // Se tiver PayPal configurado, verificar via API
-        if (botConfig.shop.automation.paypalClientId) {
-            return await checkPayPalPayments(order);
-        }
-        
-        // Fallback: simulação para testes (remover em produção)
+        // Por enquanto, usar simulação até configurar APIs
         console.log('⚠️ Usando verificação simulada - configure PayPal API para produção');
         return Math.random() < 0.2;
     } catch (error) {
