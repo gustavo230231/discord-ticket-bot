@@ -68,10 +68,11 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
     shop: {
         channelId: null, // Canal da loja
         deliveryChannelId: null, // Canal de entrega de códigos
+        receiptsChannelId: null, // Canal de comprovantes de compra
         enabled: false,
         paymentMethods: {
-            paypal: 'pagamentos@pixelcode.com', // Email PayPal
-            mbway: '+351 912 345 678' // Número MBWay
+            paypal: 'teu_email@gmail.com', // Substitui pelo teu email PayPal
+            mbway: '+351 912 345 678' // Substitui pelo teu número MBWay
         },
         automation: {
             paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
@@ -231,6 +232,10 @@ const commands = [
             option.setName('canal-entrega')
                 .setDescription('Canal onde serão entregues os códigos')
                 .setRequired(false))
+        .addChannelOption(option =>
+            option.setName('canal-comprovantes')
+                .setDescription('Canal onde aparecerão os comprovantes de compra')
+                .setRequired(false))
         .addStringOption(option =>
             option.setName('paypal')
                 .setDescription('Email do PayPal para receber pagamentos')
@@ -346,6 +351,37 @@ async function sendLog(type, title, description, color, fields = []) {
         await logChannel.send({ embeds: [embed] });
     } catch (error) {
         console.error('Erro ao enviar log:', error);
+    }
+}
+
+// Função para enviar comprovante de compra
+async function sendPurchaseReceipt(customer, product, orderId, paymentMethod) {
+    if (!botConfig.shop.receiptsChannelId) return;
+    
+    try {
+        const guild = client.guilds.cache.get(process.env.GUILD_ID);
+        const receiptsChannel = guild.channels.cache.get(botConfig.shop.receiptsChannelId);
+        
+        if (!receiptsChannel) return;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('📦 Entrega Realizada')
+            .setDescription(`${customer} recebeu: ⭐ **${product.name}**`)
+            .setColor('#00ff00')
+            .addFields(
+                { name: '👤 Cliente', value: customer.user.tag, inline: true },
+                { name: '🛍️ Produto', value: product.name, inline: true },
+                { name: '💰 Valor', value: `€${product.price}`, inline: true },
+                { name: '💳 Método', value: paymentMethod === 'paypal' ? '💙 PayPal' : '📱 MBWay', inline: true },
+                { name: '🆔 Pedido', value: orderId, inline: true },
+                { name: '⏰ Hora', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+            )
+            .setTimestamp()
+            .setFooter({ text: 'Sistema Automático - Pixel & Code' });
+
+        await receiptsChannel.send({ embeds: [embed] });
+    } catch (error) {
+        console.error('Erro ao enviar comprovante:', error);
     }
 }
 
@@ -603,12 +639,14 @@ Aqui você pode comprar nossos produtos digitais com pagamento instantâneo e en
         else if (interaction.commandName === 'config-loja') {
             const canalLoja = interaction.options.getChannel('canal-loja');
             const canalEntrega = interaction.options.getChannel('canal-entrega');
+            const canalComprovantes = interaction.options.getChannel('canal-comprovantes');
             const paypal = interaction.options.getString('paypal');
             const mbway = interaction.options.getString('mbway');
             const ativar = interaction.options.getBoolean('ativar');
 
             if (canalLoja) botConfig.shop.channelId = canalLoja.id;
             if (canalEntrega) botConfig.shop.deliveryChannelId = canalEntrega.id;
+            if (canalComprovantes) botConfig.shop.receiptsChannelId = canalComprovantes.id;
             if (paypal) botConfig.shop.paymentMethods.paypal = paypal;
             if (mbway) botConfig.shop.paymentMethods.mbway = mbway;
             if (ativar !== null) botConfig.shop.enabled = ativar;
@@ -621,6 +659,7 @@ Aqui você pode comprar nossos produtos digitais com pagamento instantâneo e en
                     { name: 'Status', value: botConfig.shop.enabled ? '✅ Ativado' : '❌ Desativado', inline: true },
                     { name: 'Canal Loja', value: botConfig.shop.channelId ? `<#${botConfig.shop.channelId}>` : 'Não configurado', inline: true },
                     { name: 'Canal Entrega', value: botConfig.shop.deliveryChannelId ? `<#${botConfig.shop.deliveryChannelId}>` : 'Não configurado', inline: true },
+                    { name: 'Canal Comprovantes', value: botConfig.shop.receiptsChannelId ? `<#${botConfig.shop.receiptsChannelId}>` : 'Não configurado', inline: true },
                     { name: '💙 PayPal', value: botConfig.shop.paymentMethods.paypal, inline: true },
                     { name: '📱 MBWay', value: botConfig.shop.paymentMethods.mbway, inline: true }
                 );
@@ -1161,6 +1200,9 @@ async function processDeliveryForApproval(interaction, order, product) {
     } catch (error) {
         console.log('Não foi possível enviar DM para o cliente');
     }
+
+    // Enviar comprovante no canal de comprovantes
+    await sendPurchaseReceipt(customer, product, order.orderId, 'paypal');
 
     // Enviar também no canal de entrega se configurado
     if (botConfig.shop.deliveryChannelId) {
