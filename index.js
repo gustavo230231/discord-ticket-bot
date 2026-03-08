@@ -31,12 +31,12 @@ const botConfig = {
     embed: {
         title: 'Pixel & Code',
         description: `Olá! 👋 Bem-vindo(a) ao Pixel & Code.
-Aqui você pode abrir um ticket para solicitar nossos serviços digitais:
+Aqui você pode abrir um ticket para relatar algum problema ou resolve uma dúvida:
 
-🔹 **Serviços disponíveis:**
-🎬 Edição de Vídeos
-🎨 Design & Posters  
-💻 Códigos de Programação
+🔹 **Perguntas mais frequentes:**
+🛠️ Suporte
+❓ Dúvidas
+🛒 Problemas
 
 🔹 **Como abrir um ticket:**
 1️⃣ Clique no botão "Abrir Ticket" abaixo (ou reaja com 🎫)
@@ -53,13 +53,12 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
 
 ✅ Após abrir o ticket, você será guiado(a) passo a passo até receber o seu pedido!`,
         color: '#5865F2',
-        footer: 'Powered by Ticket King'
+        footer: 'Powered by Pixel & Code'
     },
     buttons: {
-        comprar: { label: '🛒 Comprar', style: 'Primary', emoji: '🛒' },
-        design: { label: '🎨 Design', style: 'Success', emoji: '🎨' },
-        edicao: { label: '🎬 Edição', style: 'Danger', emoji: '🎬' },
-        programacao: { label: '💻 Programação', style: 'Secondary', emoji: '💻' }
+        Suporte: { label: '🛠️ Suporte', style: 'Primary', emoji: '🛠️' },
+        Dúvidas: { label: '❓ Dúvidas', style: 'Success', emoji: '❓' },
+        Problemas: { label: '🛒 Problemas', style: 'Danger', emoji: '🛒' },
     },
     logs: {
         channelId: null, // ID do canal de logs
@@ -71,8 +70,8 @@ Apenas o dono do ticket e a equipe poderão ver as mensagens neste canal
         receiptsChannelId: null, // Canal de comprovantes de compra
         enabled: false,
         paymentMethods: {
-            paypal: 'teu_email@gmail.com', // Substitui pelo teu email PayPal
-            mbway: '+351 912 345 678' // Substitui pelo teu número MBWay
+            paypal: 'motagustavo2012@gmail.com@gmail.com', // Substitui pelo teu email PayPal
+            mbway: '+351 919 184 357' // Substitui pelo teu número MBWay
         },
         automation: {
             paypalClientId: process.env.PAYPAL_CLIENT_ID || null,
@@ -89,7 +88,7 @@ const shopProducts = {
     'discord_bot': {
         name: '🤖 Bot Discord Personalizado',
         description: 'Bot Discord completo com sistema de tickets, moderação e comandos personalizados',
-        price: 25.00,
+        price: 54.99,
         currency: 'EUR',
         deliveryType: 'code', // 'code', 'role', 'channel'
         deliveryContent: 'Seu bot Discord foi criado! Código de acesso: BOT-{RANDOM}',
@@ -98,39 +97,12 @@ const shopProducts = {
     'website': {
         name: '🌐 Website Profissional',
         description: 'Website responsivo e moderno para sua empresa ou projeto pessoal',
-        price: 50.00,
+        price: 64.99,
         currency: 'EUR',
         deliveryType: 'code',
         deliveryContent: 'Seu website está pronto! Link e credenciais: WEB-{RANDOM}',
         channelAccess: null
     },
-    'logo_design': {
-        name: '🎨 Logo Profissional',
-        description: 'Logo personalizado para sua marca com múltiplas variações e formatos',
-        price: 15.00,
-        currency: 'EUR',
-        deliveryType: 'code',
-        deliveryContent: 'Seu logo foi criado! Download: LOGO-{RANDOM}',
-        channelAccess: null
-    },
-    'video_edit': {
-        name: '🎬 Edição de Vídeo',
-        description: 'Edição profissional de vídeo até 10 minutos com efeitos e transições',
-        price: 30.00,
-        currency: 'EUR',
-        deliveryType: 'code',
-        deliveryContent: 'Seu vídeo foi editado! Download: VIDEO-{RANDOM}',
-        channelAccess: null
-    },
-    'premium_access': {
-        name: '⭐ Acesso Premium',
-        description: 'Acesso ao canal premium com conteúdo exclusivo e suporte prioritário',
-        price: 10.00,
-        currency: 'EUR',
-        deliveryType: 'channel',
-        deliveryContent: 'Bem-vindo ao Premium! Você agora tem acesso ao canal exclusivo.',
-        channelAccess: null // Será configurado depois
-    }
 };
 
 // Armazenar pedidos pendentes com timeout
@@ -1907,3 +1879,4 @@ async function showMBWayInstructions(interaction, orderId) {
 
     await interaction.update({ embeds: [embed], components: [buttons] });
 }
+
